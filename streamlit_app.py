@@ -1,21 +1,30 @@
 # -*- coding: utf-8 -*-
 # 学習計画・実行・振り返りアプリ（DB不使用・セッション内メモリ版）
-# 実行: pip install streamlit pandas plotly streamlit-autorefresh && streamlit run study_app_v2.py
+# 実行: pip install streamlit pandas plotly && streamlit run study_app_v2.py
 # 注意: データはst.session_stateのみに保持（再読み込み/再起動で消えます）
 
 import random
 import string
+import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def now_jst():
+    return datetime.now(JST)
+
 
 # ============================================================
 # 定数
 # ============================================================
-SUBJECTS = ["数学", "英語", "国語", "理科", "社会", "プログラミング", "探究", "その他"]
+# 普通科高校の教科（学習指導要領に基づく）
+SUBJECTS = ["国語", "地理歴史", "公民", "数学", "理科", "保健体育", "芸術", "外国語", "家庭", "情報", "総合的な探究の時間", "その他"]
 PRIORITIES = ["高", "中", "低"]
 PRIORITY_ORDER = {"高": 0, "中": 1, "低": 2}
 ACHIEVEMENTS = ["達成", "部分達成", "未達成"]
@@ -74,21 +83,15 @@ def generate_user_id() -> str:
 # ============================================================
 # タスク操作（すべて st.session_state.tasks を直接操作）
 # ============================================================
-def add_task(user_id, subject, task, priority, target_minutes,
-             theme="", question="", research_content="", reference_material="", next_action=""):
+def add_task(user_id, subject, task, priority, target_minutes):
     st.session_state.tasks.append({
         "id": st.session_state.next_task_id,
         "user_id": user_id,
-        "created_date": str(datetime.now().date()),
+        "created_date": str(now_jst().date()),
         "subject": subject,
         "task": task,
         "priority": priority,
         "target_minutes": int(target_minutes),
-        "theme": theme,
-        "question": question,
-        "research_content": research_content,
-        "reference_material": reference_material,
-        "next_action": next_action,
         "completed": 0,
         "plan_date": None,
         "assigned_today": 0,
@@ -101,7 +104,6 @@ def _tasks_df(user_id):
     rows = [t for t in st.session_state.tasks if t["user_id"] == user_id]
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         "id", "user_id", "created_date", "subject", "task", "priority", "target_minutes",
-        "theme", "question", "research_content", "reference_material", "next_action",
         "completed", "plan_date", "assigned_today", "postponed",
     ])
 
@@ -214,17 +216,13 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-TODAY = str(datetime.now().date())
-
-# タイマー動作中はボタン不要で1秒ごとに自動再描画
-if st.session_state.timer_running:
-    st_autorefresh(interval=1000, key="timer_autorefresh")
+TODAY = str(now_jst().date())
 
 
 def elapsed_minutes_now():
     e = st.session_state.timer_elapsed_before
     if st.session_state.timer_running and st.session_state.timer_start:
-        e += (datetime.now() - st.session_state.timer_start).total_seconds() / 60
+        e += (now_jst() - st.session_state.timer_start).total_seconds() / 60
     return e
 
 
@@ -277,7 +275,7 @@ header_l, header_r = st.columns([3, 1])
 with header_l:
     st.title("📚 学習コーチングアプリ")
 with header_r:
-    st.metric("現在時刻", datetime.now().strftime("%H:%M"))
+    st.metric("現在時刻", now_jst().strftime("%H:%M"))
 
 st.warning(SHORT_NOTICE)
 
@@ -299,22 +297,12 @@ with tab1:
             task_name = st.text_input("やること（例：二次関数の問題演習）")
             target_minutes = st.number_input("目標時間（分）", min_value=5, max_value=600, value=30, step=5)
 
-        theme = question = research_content = reference_material = next_action = ""
-        if subject == "探究":
-            st.markdown("**探究用追加項目（任意）**")
-            theme = st.text_input("探究テーマ")
-            question = st.text_input("課題・問い")
-            research_content = st.text_area("調査内容")
-            reference_material = st.text_input("参考資料")
-            next_action = st.text_input("次回やること")
-
         submitted = st.form_submit_button("登録する")
         if submitted:
             if not task_name.strip():
                 st.warning("「やること」を入力してください。")
             else:
-                add_task(USER_ID, subject, task_name.strip(), priority, int(target_minutes),
-                         theme, question, research_content, reference_material, next_action)
+                add_task(USER_ID, subject, task_name.strip(), priority, int(target_minutes))
                 st.success("学習内容を登録しました。")
 
     st.subheader("登録済み・未完了の学習内容")
@@ -327,8 +315,6 @@ with tab1:
                 c1, c2, c3 = st.columns([3, 1, 1])
                 with c1:
                     st.write(f"**{row['subject']}** ｜ {row['task']}")
-                    if row["subject"] == "探究" and row["theme"]:
-                        st.caption(f"テーマ：{row['theme']}")
                 with c2:
                     st.write(f"優先度：{row['priority']}")
                 with c3:
@@ -370,7 +356,7 @@ with tab2:
 # ============================================================
 with tab3:
     st.header("学習実行")
-    st.caption(f"現在時刻：{datetime.now().strftime('%H:%M')}（タイマー動作中は自動で更新されます）")
+    st.caption(f"現在時刻：{now_jst().strftime('%H:%M')}（タイマー動作中は自動で更新されます）")
 
     todo_df = get_today_plan(USER_ID, TODAY, assigned=True)
 
@@ -395,7 +381,7 @@ with tab3:
         with colA:
             if st.button("▶ スタート", disabled=st.session_state.timer_task_id == selected_id and st.session_state.timer_running):
                 st.session_state.timer_task_id = selected_id
-                st.session_state.timer_start = datetime.now()
+                st.session_state.timer_start = now_jst()
                 st.session_state.timer_elapsed_before = 0.0
                 st.session_state.timer_running = True
                 st.session_state.show_finish_form = False
@@ -407,7 +393,7 @@ with tab3:
                 st.rerun()
         with colC:
             if st.button("▶ 再開", disabled=not (st.session_state.timer_task_id == selected_id and not st.session_state.timer_running and st.session_state.timer_start)):
-                st.session_state.timer_start = datetime.now()
+                st.session_state.timer_start = now_jst()
                 st.session_state.timer_running = True
                 st.rerun()
         with colD:
@@ -557,3 +543,8 @@ with tab5:
 
     st.subheader("スクリーンショット保存のご案内")
     st.info("今日の学習記録を残すため、この画面をスクリーンショットしてください。")
+
+# タイマー動作中はボタン不要で1秒ごとに自動再描画（追加パッケージ不使用）
+if st.session_state.timer_running:
+    time.sleep(1)
+    st.rerun()
