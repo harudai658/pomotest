@@ -1,48 +1,35 @@
 # -*- coding: utf-8 -*-
-"""
-学習計画・実行・振り返りアプリ
---------------------------------
-計画 → 実行 → 記録 → 振り返り → 改善 の学習サイクルを支援する
-Streamlit製・単一ファイルのアプリです。
-
-■ 実行方法
-    pip install streamlit pandas plotly
-    streamlit run study_app.py
-
-■ データ保存について
-    SQLite（study_app.db）にローカル保存しますが、Streamlitの実行環境によっては
-    再起動等でデータが失われる可能性があります。重要な記録はCSV/コピー/
-    スクリーンショットで別途保存してください（アプリ内でも案内します）。
-"""
+# 学習計画・実行・振り返りアプリ（DB不使用・セッション内メモリ版）
+# 実行: pip install streamlit pandas plotly streamlit-autorefresh && streamlit run study_app_v2.py
+# 注意: データはst.session_stateのみに保持（再読み込み/再起動で消えます）
 
 import random
-import sqlite3
 import string
 from datetime import datetime
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 # ============================================================
 # 定数
 # ============================================================
-DB_PATH = "study_app.db"
-
 SUBJECTS = ["数学", "英語", "国語", "理科", "社会", "プログラミング", "探究", "その他"]
 PRIORITIES = ["高", "中", "低"]
 PRIORITY_ORDER = {"高": 0, "中": 1, "低": 2}
 ACHIEVEMENTS = ["達成", "部分達成", "未達成"]
 UNDONE_REASONS = ["時間不足", "難しかった", "集中できなかった", "計画時間が短かった", "その他"]
 
+SHORT_NOTICE = "⚠️ データはこの画面を開いている間だけの一時保存です。永続保存ではありません。こまめにCSV／コピー／スクリーンショットで保存してください。"
+
 PERSISTENCE_NOTICE = (
-    "このアプリはログイン不要で利用できます。\n\n"
-    "ただし、Streamlitの仕様上、データの永続保存を完全に保証するものではありません。\n"
-    "以下の場合、データが失われる可能性があります。\n"
-    "- アプリが再起動された場合\n"
-    "- サーバー側のデータがリセットされた場合\n"
-    "- ブラウザ環境が変わった場合\n"
-    "- 保存情報が削除された場合\n\n"
+    "このアプリはログイン不要・データベース不使用で利用できます。\n\n"
+    "データはブラウザの1セッション中のメモリにのみ保持されます。\n"
+    "以下の場合、データが失われます。\n"
+    "- ページを再読み込みした場合\n"
+    "- ブラウザタブ／ウィンドウを閉じた場合\n"
+    "- アプリ（サーバー）が再起動された場合\n\n"
     "重要な学習記録は以下の方法で保存してください。\n"
     "- スクリーンショット保存\n"
     "- CSVダウンロード\n"
@@ -51,187 +38,169 @@ PERSISTENCE_NOTICE = (
 
 st.set_page_config(page_title="学習コーチングアプリ", page_icon="📚", layout="wide")
 
+# HTML/CSSを埋め込んでスタイルを調整（st.markdownにunsafe_allow_html=Trueを渡す）
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetricValue"] { color: #3b82f6; }
+    .stTabs [data-baseweb="tab"] { font-weight: 600; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # ============================================================
-# DB
+# セッション内メモリ・ストア初期化
 # ============================================================
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+def init_store():
+    if "tasks" not in st.session_state:
+        st.session_state.tasks = []  # list[dict]
+    if "records" not in st.session_state:
+        st.session_state.records = []  # list[dict]
+    if "next_task_id" not in st.session_state:
+        st.session_state.next_task_id = 1
+    if "next_record_id" not in st.session_state:
+        st.session_state.next_record_id = 1
 
 
-def init_db():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            created_date TEXT,
-            subject TEXT,
-            task TEXT,
-            priority TEXT,
-            target_minutes INTEGER,
-            theme TEXT,
-            question TEXT,
-            research_content TEXT,
-            reference_material TEXT,
-            next_action TEXT,
-            completed INTEGER DEFAULT 0,
-            plan_date TEXT,
-            assigned_today INTEGER DEFAULT 0,
-            postponed INTEGER DEFAULT 0
-        )
-        """
-    )
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            task_id INTEGER,
-            record_date TEXT,
-            subject TEXT,
-            task TEXT,
-            planned_minutes INTEGER,
-            actual_minutes INTEGER,
-            achievement TEXT,
-            comment TEXT,
-            good_points TEXT,
-            improvements TEXT,
-            next_memo TEXT,
-            reason TEXT
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
+init_store()
 
 
 def generate_user_id() -> str:
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
+# ============================================================
+# タスク操作（すべて st.session_state.tasks を直接操作）
+# ============================================================
 def add_task(user_id, subject, task, priority, target_minutes,
              theme="", question="", research_content="", reference_material="", next_action=""):
-    conn = get_conn()
-    conn.execute(
-        """INSERT INTO tasks
-        (user_id, created_date, subject, task, priority, target_minutes,
-         theme, question, research_content, reference_material, next_action)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        (user_id, str(datetime.now().date()), subject, task, priority, target_minutes,
-         theme, question, research_content, reference_material, next_action),
-    )
-    conn.commit()
-    conn.close()
+    st.session_state.tasks.append({
+        "id": st.session_state.next_task_id,
+        "user_id": user_id,
+        "created_date": str(datetime.now().date()),
+        "subject": subject,
+        "task": task,
+        "priority": priority,
+        "target_minutes": int(target_minutes),
+        "theme": theme,
+        "question": question,
+        "research_content": research_content,
+        "reference_material": reference_material,
+        "next_action": next_action,
+        "completed": 0,
+        "plan_date": None,
+        "assigned_today": 0,
+        "postponed": 0,
+    })
+    st.session_state.next_task_id += 1
+
+
+def _tasks_df(user_id):
+    rows = [t for t in st.session_state.tasks if t["user_id"] == user_id]
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+        "id", "user_id", "created_date", "subject", "task", "priority", "target_minutes",
+        "theme", "question", "research_content", "reference_material", "next_action",
+        "completed", "plan_date", "assigned_today", "postponed",
+    ])
 
 
 def get_uncompleted_tasks(user_id):
-    conn = get_conn()
-    df = pd.read_sql_query(
-        "SELECT * FROM tasks WHERE user_id=? AND completed=0 ORDER BY id", conn, params=(user_id,)
-    )
-    conn.close()
-    return df
+    df = _tasks_df(user_id)
+    if df.empty:
+        return df
+    return df[df["completed"] == 0].sort_values("id")
 
 
 def delete_task(task_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-    conn.commit()
-    conn.close()
+    st.session_state.tasks = [t for t in st.session_state.tasks if t["id"] != task_id]
 
 
 def clear_today_plan(user_id, today):
-    conn = get_conn()
-    conn.execute(
-        "UPDATE tasks SET assigned_today=0, postponed=0, plan_date=NULL "
-        "WHERE user_id=? AND plan_date=? AND completed=0",
-        (user_id, today),
-    )
-    conn.commit()
-    conn.close()
+    for t in st.session_state.tasks:
+        if t["user_id"] == user_id and t["plan_date"] == today and t["completed"] == 0:
+            t["assigned_today"] = 0
+            t["postponed"] = 0
+            t["plan_date"] = None
 
 
 def create_today_plan(user_id, today, budget_minutes):
     clear_today_plan(user_id, today)
     df = get_uncompleted_tasks(user_id)
+    if df.empty:
+        return
     df = df.sort_values(by="priority", key=lambda s: s.map(PRIORITY_ORDER))
 
-    conn = get_conn()
-    c = conn.cursor()
     total = 0
+    id_to_task = {t["id"]: t for t in st.session_state.tasks}
     for _, row in df.iterrows():
+        t = id_to_task[row["id"]]
         minutes = row["target_minutes"] or 0
+        t["plan_date"] = today
         if total + minutes <= budget_minutes:
             total += minutes
-            c.execute(
-                "UPDATE tasks SET plan_date=?, assigned_today=1, postponed=0 WHERE id=?",
-                (today, row["id"]),
-            )
+            t["assigned_today"] = 1
+            t["postponed"] = 0
         else:
-            c.execute(
-                "UPDATE tasks SET plan_date=?, assigned_today=0, postponed=1 WHERE id=?",
-                (today, row["id"]),
-            )
-    conn.commit()
-    conn.close()
+            t["assigned_today"] = 0
+            t["postponed"] = 1
 
 
 def get_today_plan(user_id, today, assigned=True):
-    conn = get_conn()
+    df = _tasks_df(user_id)
+    if df.empty:
+        return df
     flag_col = "assigned_today" if assigned else "postponed"
-    df = pd.read_sql_query(
-        f"SELECT * FROM tasks WHERE user_id=? AND plan_date=? AND {flag_col}=1 AND completed=0 "
-        "ORDER BY CASE priority WHEN '高' THEN 0 WHEN '中' THEN 1 ELSE 2 END, id",
-        conn, params=(user_id, today),
-    )
-    conn.close()
-    return df
+    df = df[(df["plan_date"] == today) & (df[flag_col] == 1) & (df["completed"] == 0)]
+    if df.empty:
+        return df
+    return df.sort_values(by="priority", key=lambda s: s.map(PRIORITY_ORDER))
 
 
 def mark_task_completed(task_id):
-    conn = get_conn()
-    conn.execute("UPDATE tasks SET completed=1 WHERE id=?", (task_id,))
-    conn.commit()
-    conn.close()
+    for t in st.session_state.tasks:
+        if t["id"] == task_id:
+            t["completed"] = 1
 
 
+# ============================================================
+# 記録操作（すべて st.session_state.records を直接操作）
+# ============================================================
 def save_record(user_id, task_id, record_date, subject, task, planned_minutes, actual_minutes,
                  achievement, comment, good_points, improvements, next_memo, reason):
-    conn = get_conn()
-    conn.execute(
-        """INSERT INTO records
-        (user_id, task_id, record_date, subject, task, planned_minutes, actual_minutes,
-         achievement, comment, good_points, improvements, next_memo, reason)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (user_id, task_id, record_date, subject, task, planned_minutes, actual_minutes,
-         achievement, comment, good_points, improvements, next_memo, reason),
-    )
-    conn.commit()
-    conn.close()
+    st.session_state.records.append({
+        "id": st.session_state.next_record_id,
+        "user_id": user_id,
+        "task_id": task_id,
+        "record_date": record_date,
+        "subject": subject,
+        "task": task,
+        "planned_minutes": int(planned_minutes),
+        "actual_minutes": int(actual_minutes),
+        "achievement": achievement,
+        "comment": comment,
+        "good_points": good_points,
+        "improvements": improvements,
+        "next_memo": next_memo,
+        "reason": reason,
+    })
+    st.session_state.next_record_id += 1
 
 
 def get_records(user_id, record_date=None):
-    conn = get_conn()
+    rows = [r for r in st.session_state.records if r["user_id"] == user_id]
     if record_date:
-        df = pd.read_sql_query(
-            "SELECT * FROM records WHERE user_id=? AND record_date=? ORDER BY id",
-            conn, params=(user_id, record_date),
-        )
-    else:
-        df = pd.read_sql_query(
-            "SELECT * FROM records WHERE user_id=? ORDER BY id DESC", conn, params=(user_id,)
-        )
-    conn.close()
-    return df
+        rows = [r for r in rows if r["record_date"] == record_date]
+    cols = ["id", "user_id", "task_id", "record_date", "subject", "task", "planned_minutes",
+            "actual_minutes", "achievement", "comment", "good_points", "improvements",
+            "next_memo", "reason"]
+    df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+    return df.sort_values("id", ascending=False) if not df.empty else df
 
-
-init_db()
 
 # ============================================================
-# セッション状態の初期化
+# セッション状態の初期化（ID・タイマー）
 # ============================================================
 defaults = {
     "user_id": None,
@@ -246,6 +215,10 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 TODAY = str(datetime.now().date())
+
+# タイマー動作中はボタン不要で1秒ごとに自動再描画
+if st.session_state.timer_running:
+    st_autorefresh(interval=1000, key="timer_autorefresh")
 
 
 def elapsed_minutes_now():
@@ -271,6 +244,7 @@ if st.session_state.user_id is None:
             st.rerun()
     else:
         input_id = st.sidebar.text_input("学習ID（例：A72K9F）").strip().upper()
+        st.sidebar.caption("※同じセッション内でのみ有効です。別ブラウザ／再起動後のデータ引き継ぎはできません。")
         if st.sidebar.button("このIDで開始する"):
             if input_id:
                 st.session_state.user_id = input_id
@@ -304,6 +278,8 @@ with header_l:
     st.title("📚 学習コーチングアプリ")
 with header_r:
     st.metric("現在時刻", datetime.now().strftime("%H:%M"))
+
+st.warning(SHORT_NOTICE)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["📝 学習内容登録", "📅 今日の計画", "⏱️ 学習実行", "📊 振り返り・記録", "💾 保存・データ管理"]
@@ -394,7 +370,7 @@ with tab2:
 # ============================================================
 with tab3:
     st.header("学習実行")
-    st.caption(f"現在時刻：{datetime.now().strftime('%H:%M')}（表示を更新するには下のボタンを押してください）")
+    st.caption(f"現在時刻：{datetime.now().strftime('%H:%M')}（タイマー動作中は自動で更新されます）")
 
     todo_df = get_today_plan(USER_ID, TODAY, assigned=True)
 
@@ -441,9 +417,6 @@ with tab3:
                 st.session_state.show_finish_form = True
                 st.rerun()
 
-        if st.button("🔄 表示を更新"):
-            st.rerun()
-
         if st.session_state.timer_task_id == selected_id and st.session_state.timer_start is not None:
             elapsed = elapsed_minutes_now()
             target = selected_row["target_minutes"] or 0
@@ -482,7 +455,7 @@ with tab3:
             with st.form("finish_form"):
                 actual_minutes = st.number_input("実際の学習時間（分）", min_value=0, max_value=1000, value=default_minutes)
                 achievement = st.selectbox("達成度", ACHIEVEMENTS)
-                comment = st.text_area("振り返りコメント")
+                comment = st.text_input("振り返りコメント（1行）")
                 good_points = st.text_area("良かった点")
                 improvements = st.text_area("改善点")
                 next_memo = st.text_input("次回へのメモ")
